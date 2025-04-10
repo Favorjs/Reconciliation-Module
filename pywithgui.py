@@ -3,48 +3,75 @@ from difflib import SequenceMatcher
 import streamlit as st
 from io import BytesIO
 
+# Increase pandas styler max elements
+pd.set_option("styler.render.max_elements", 2**31-1)  # Maximum integer value
+
+# Check for openpyxl and install if missing
+try:
+    import openpyxl
+except ImportError:
+    st.warning("The 'openpyxl' package is required. Installing it now...")
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
+    import openpyxl
+
 # --- Page Configuration ---
 st.set_page_config(
     page_title="Ultra-Strict Sheet Matcher",
-    page_icon="🔒",
+    page_icon="🔍",
     layout="centered"
 )
 
 # --- Initialize Session State ---
 if 'matching_levels' not in st.session_state:
-    st.session_state.matching_levels = [{'col1': None, 'col2': None, 'threshold': 85}]
+    st.session_state.matching_levels = [{'col1': None, 'col2': None, 'threshold': 50}]
 
 # --- Matching Functions ---
 def clean_name(name):
     return str(name).strip().lower()
 
 def ultra_strict_match(name1, name2):
-    """Ultra-strict matching requiring 2+ words with 85%+ similarity"""
+    """Ultra-strict matching requiring 2+ words with 50%+ similarity"""
     words1 = clean_name(name1).split()
     words2 = clean_name(name2).split()
     
     if len(words1) < 2 or len(words2) < 2:
-        return 0  # Not enough words for ultra-strict matching
+        return 0
     
     strong_matches = 0
     total_similarity = 0
     
-    # Check first 3 words maximum
     for i in range(min(3, len(words1))):
         for j in range(min(3, len(words2))):
-            if abs(i-j) > 1:  # Only allow reasonable position differences
+            if abs(i-j) > 1:
                 continue
                 
             similarity = SequenceMatcher(None, words1[i], words2[j]).ratio()
-            if similarity >= 0.85:  # 85% similarity threshold
+            if similarity >= 0.50:
                 strong_matches += 1
                 total_similarity += similarity
                 if strong_matches >= 2:
-                    return (total_similarity / strong_matches) * 100  # Average match percentage
+                    return (total_similarity / strong_matches) * 100
     return 0
+
+def values_match(val1, val2, threshold):
+    if pd.isna(val1) or pd.isna(val2):
+        return False
+    return SequenceMatcher(None, str(val1), str(val2)).ratio() >= (threshold/100)
 
 # --- Core Matching Logic ---
 def ultra_strict_matching(df1, df2, match_cols):
+    # Rename columns to avoid conflicts
+    df1 = df1.add_suffix('_Sheet1')
+    df2 = df2.add_suffix('_Sheet2')
+    
+    matched_cols_sheet1 = [rule['col1'] + '_Sheet1' for rule in match_cols]
+    matched_cols_sheet2 = [rule['col2'] + '_Sheet2' for rule in match_cols]
+    
+    other_cols_sheet1 = [col for col in df1.columns if col not in matched_cols_sheet1]
+    other_cols_sheet2 = [col for col in df2.columns if col not in matched_cols_sheet2]
+    
     results = []
     matched_indices1 = set()
     matched_indices2 = set()
@@ -59,21 +86,20 @@ def ultra_strict_matching(df1, df2, match_cols):
             if idx1 in matched_indices1:
                 continue
                 
-            # Check all matching levels
             all_match = True
             match_scores = []
             
             for rule in match_cols:
-                val1 = rec1[rule['col1']] if rule['col1'] in rec1 else None
-                val2 = rec2[rule['col2']] if rule['col2'] in rec2 else None
+                col1 = rule['col1'] + '_Sheet1'
+                col2 = rule['col2'] + '_Sheet2'
+                val1 = rec1.get(col1, None)
+                val2 = rec2.get(col2, None)
                 
                 if not values_match(val1, val2, rule['threshold']):
                     all_match = False
                     break
                 
-                match_scores.append(
-                    SequenceMatcher(None, str(val1), str(val2)).ratio()
-                )
+                match_scores.append(SequenceMatcher(None, str(val1), str(val2)).ratio())
             
             if all_match and match_scores:
                 current_score = (sum(match_scores)/len(match_scores)) * 100
@@ -82,20 +108,20 @@ def ultra_strict_matching(df1, df2, match_cols):
                     best_match = rec1
                     best_idx1 = idx1
         
-        if best_score >= 85:  # Only consider if meets ultra-strict threshold
-            results.append({
-                'Type': 'Ultra-Strict Match',
+        if best_score >= 50:
+            combined = {
+                **{k: v for k, v in best_match.items() if k in other_cols_sheet1},
+                **{k: v for k, v in best_match.items() if k in matched_cols_sheet1},
+                **{k: v for k, v in rec2.items() if k in matched_cols_sheet2},
+                **{k: v for k, v in rec2.items() if k in other_cols_sheet2},
                 'Match_Score': best_score,
-                'Account_Number': rec2.get('Account Number', ''),
-                'Name_Sheet1': best_match.get('Name', ''),
-                'Name_Sheet2': rec2.get('Name', ''),
-                'Units_Sheet1': best_match.get('Units', ''),
-                'Units_Sheet2': rec2.get('Units', ''),
-                'Match_Status': 'Verified' if best_score >= 90 else 'Confirmed'
-            })
+                'Match_Status': 'Verified' if best_score >= 90 else 'Confirmed',
+                'Match_Type': 'Ultra-Strict Match'
+            }
+            results.append(combined)
             matched_indices1.add(best_idx1)
             matched_indices2.add(idx2)
-    
+
     # Second pass: strict-but-not-ultra matches
     for idx2, rec2 in enumerate(df2.to_dict('records')):
         if idx2 not in matched_indices2:
@@ -106,13 +132,14 @@ def ultra_strict_matching(df1, df2, match_cols):
                 if idx1 in matched_indices1:
                     continue
                     
-                # Check all matching levels
                 all_match = True
                 match_scores = []
                 
                 for rule in match_cols:
-                    val1 = rec1[rule['col1']] if rule['col1'] in rec1 else None
-                    val2 = rec2[rule['col2']] if rule['col2'] in rec2 else None
+                    col1 = rule['col1'] + '_Sheet1'
+                    col2 = rule['col2'] + '_Sheet2'
+                    val1 = rec1.get(col1, None)
+                    val2 = rec2.get(col2, None)
                     
                     similarity = SequenceMatcher(None, str(val1), str(val2)).ratio() * 100
                     if similarity < rule['threshold']:
@@ -123,67 +150,66 @@ def ultra_strict_matching(df1, df2, match_cols):
                 
                 if all_match and match_scores:
                     current_score = sum(match_scores)/len(match_scores)
-                    if 60 <= current_score < 85 and current_score > best_score:
+                    if 50 <= current_score < 85 and current_score > best_score:
                         best_score = current_score
                         best_match = rec1
                         best_idx1 = idx1
             
             if best_match:
-                results.append({
-                    'Type': 'Strict Match',
+                combined = {
+                    **{k: v for k, v in best_match.items() if k in other_cols_sheet1},
+                    **{k: v for k, v in best_match.items() if k in matched_cols_sheet1},
+                    **{k: v for k, v in rec2.items() if k in matched_cols_sheet2},
+                    **{k: v for k, v in rec2.items() if k in other_cols_sheet2},
                     'Match_Score': best_score,
-                    'Account_Number': rec2.get('Account Number', ''),
-                    'Name_Sheet1': best_match.get('Name', ''),
-                    'Name_Sheet2': rec2.get('Name', ''),
-                    'Units_Sheet1': best_match.get('Units', ''),
-                    'Units_Sheet2': rec2.get('Units', ''),
-                    'Match_Status': 'Review Recommended'
-                })
+                    'Match_Status': 'Review Recommended',
+                    'Match_Type': 'Strict Match'
+                }
+                results.append(combined)
                 matched_indices1.add(best_idx1)
                 matched_indices2.add(idx2)
-    
-    # Third pass: possible matches (below 60%)
+
+    # Third pass: possible matches
     for idx2, rec2 in enumerate(df2.to_dict('records')):
         if idx2 not in matched_indices2:
-            results.append({
-                'Type': 'Possible Match',
+            combined = {
+                **{k: None for k in other_cols_sheet1},
+                **{k: None for k in matched_cols_sheet1},
+                **{k: v for k, v in rec2.items()},
                 'Match_Score': 0,
-                'Account_Number': rec2.get('Account Number', ''),
-                'Name_Sheet1': '',
-                'Name_Sheet2': rec2.get('Name', ''),
-                'Units_Sheet1': '',
-                'Units_Sheet2': rec2.get('Units', ''),
-                'Match_Status': 'Manual Review Needed'
-            })
-    
-    # Fourth pass: complete non-matches
+                'Match_Status': 'Manual Review Needed',
+                'Match_Type': 'Possible Match'
+            }
+            results.append(combined)
+
+    # Fourth pass: non-matches
     for idx1, rec1 in enumerate(df1.to_dict('records')):
         if idx1 not in matched_indices1:
-            results.append({
-                'Type': 'No Match',
+            combined = {
+                **{k: v for k, v in rec1.items()},
+                **{k: None for k in matched_cols_sheet2},
+                **{k: None for k in other_cols_sheet2},
                 'Match_Score': 0,
-                'Account_Number': '',
-                'Name_Sheet1': rec1.get('Name', ''),
-                'Name_Sheet2': '',
-                'Units_Sheet1': rec1.get('Units', ''),
-                'Units_Sheet2': '',
-                'Match_Status': 'No Match Found'
-            })
+                'Match_Status': 'No Match Found',
+                'Match_Type': 'No Match'
+            }
+            results.append(combined)
+
+    ordered_columns = (
+        other_cols_sheet1 + 
+        matched_cols_sheet1 + 
+        matched_cols_sheet2 + 
+        other_cols_sheet2 + 
+        ['Match_Score', 'Match_Status', 'Match_Type']
+    )
     
-    return pd.DataFrame(results).sort_values(
-        by=['Match_Score', 'Type'], 
+    return pd.DataFrame(results)[ordered_columns].sort_values(
+        by=['Match_Score', 'Match_Type'], 
         ascending=[False, True]
     )
 
-def values_match(val1, val2, threshold):
-    """Compare two values with threshold"""
-    if pd.isna(val1) or pd.isna(val2):
-        return False
-    return SequenceMatcher(None, str(val1), str(val2)).ratio() >= (threshold/100)
-
 # --- UI Components ---
 def matching_level_ui(level_idx, sheet1_cols, sheet2_cols):
-    """Create UI for one matching level"""
     cols = st.columns([3, 3, 2, 1])
     
     with cols[0]:
@@ -201,7 +227,7 @@ def matching_level_ui(level_idx, sheet1_cols, sheet2_cols):
     with cols[2]:
         threshold = st.slider(
             f"Similarity % (Level {level_idx+1})",
-            70, 100, 85,
+            50, 100, 50,
             key=f"threshold_{level_idx}"
         )
     with cols[3]:
@@ -213,133 +239,191 @@ def matching_level_ui(level_idx, sheet1_cols, sheet2_cols):
     return {'col1': col1, 'col2': col2, 'threshold': threshold}
 
 # --- Streamlit UI ---
-st.title("🔒 Ultra-Strict Sheet Matcher")
+st.title("🔍 XModule: Matching Toolkit")
 st.markdown("""
 **Match records across sheets with:**
-- **2+ words at 85%+ similarity**  
+- **2+ words at 50%+ similarity**  
 - **Multi-level matching**  
-- **Position-aware comparison**  
+- **Upload you data in a file with two sheets** 
+- **NOTE: Éhis akóma douléiá,
+   Download and verify data for duplicates or remove duplicates before matching**  
 """)
 
-# --- File Upload ---
 uploaded_file = st.file_uploader("Upload Excel file with two sheets:", type=["xlsx", "xls"])
 
 if uploaded_file:
     try:
-        # Load both sheets
+        sheet_names = pd.ExcelFile(uploaded_file).sheet_names
+        if len(sheet_names) < 2:
+            st.error("The uploaded file must contain at least two sheets.")
+            st.stop()
+            
         df_sheet1 = pd.read_excel(uploaded_file, sheet_name=0)
         df_sheet2 = pd.read_excel(uploaded_file, sheet_name=1)
         
-        # Initialize matching levels if empty
-        if not st.session_state.matching_levels:
-            st.session_state.matching_levels = [{
-                'col1': df_sheet1.columns[0],
-                'col2': df_sheet2.columns[0],
-                'threshold': 85
-            }]
+        # Handle duplicate column names
+        df_sheet1 = df_sheet1.add_suffix('_Sheet1')
+        df_sheet2 = df_sheet2.add_suffix('_Sheet2')
         
-        # --- Matching Configuration ---
-        st.subheader("Configure Matching Levels")
+        st.subheader("📋 Original Sheets Preview")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"📄 {sheet_names[0]}", df_sheet1.head())
+        with col2:
+            st.write(f"📄 {sheet_names[1]}", df_sheet2.head())
+
+        if not st.session_state.matching_levels[0]['col1']:
+            st.session_state.matching_levels[0] = {
+                'col1': df_sheet1.columns[0].replace('_Sheet1', ''),
+                'col2': df_sheet2.columns[0].replace('_Sheet2', ''),
+                'threshold': 50
+            }
         
-        # Add level button
+        st.subheader("🔧 Configure Matching Levels")
         if st.button("➕ Add Matching Level"):
             new_col1 = df_sheet1.columns[
                 min(len(st.session_state.matching_levels), len(df_sheet1.columns)-1)
-            ]
+            ].replace('_Sheet1', '')
             new_col2 = df_sheet2.columns[
                 min(len(st.session_state.matching_levels), len(df_sheet2.columns)-1)
-            ]
+            ].replace('_Sheet2', '')
             st.session_state.matching_levels.append({
                 'col1': new_col1,
                 'col2': new_col2,
-                'threshold': 85
+                'threshold': 50
             })
             st.rerun()
         
-        # Display all levels
         matching_rules = []
         for i in range(len(st.session_state.matching_levels)):
             matching_rules.append(
-                matching_level_ui(i, df_sheet1.columns, df_sheet2.columns)
+                matching_level_ui(i, 
+                                [col.replace('_Sheet1', '') for col in df_sheet1.columns],
+                                [col.replace('_Sheet2', '') for col in df_sheet2.columns])
             )
-        
-        # --- Run Matching ---
-        if st.button("🚀 Run Ultra-Strict Matching", type="primary"):
-            with st.spinner("Applying matching rules..."):
-                result = ultra_strict_matching(df_sheet1, df_sheet2, matching_rules)
-                
-                # --- Color Coding ---
-                def color_status(val):
-                    if val == 'Verified':
-                        return 'background-color: #a5d6a7'  # Strong green
-                    elif val == 'Confirmed':
-                        return 'background-color: #c8e6c9'  # Light green
-                    elif val == 'Review Recommended':
-                        return 'background-color: #fff9c4'  # Yellow
-                    elif val == 'Manual Review Needed':
-                        return 'background-color: #ffcc80'  # Orange
-                    else:
-                        return 'background-color: #eeeeee'   # Gray
-                
-                # --- Display Results ---
-                st.dataframe(
-                    result.style.applymap(color_status, subset=['Match_Status']),
-                    height=700,
-                    column_config={
-                        "Match_Score": st.column_config.ProgressColumn(
-                            "Confidence",
-                            format="%.0f%%",
-                            min_value=0,
-                            max_value=100,
-                        )
-                    }
+
+        if st.button("🚀 Run Super Smart Matching", type="primary"):
+            with st.spinner("🔍 Hunting for matches..."):
+                result = ultra_strict_matching(
+                    df_sheet1.rename(columns=lambda x: x.replace('_Sheet1', '')),
+                    df_sheet2.rename(columns=lambda x: x.replace('_Sheet2', '')),
+                    matching_rules
                 )
                 
-                # --- Download ---
+                def color_status(val):
+                    colors = {
+                        'Verified': '#a5d6a7',
+                        'Confirmed': '#c8e6c9',
+                        'Review Recommended': '#fff9c4',
+                        'Manual Review Needed': '#ffcc80',
+                        'No Match Found': '#eeeeee'
+                    }
+                    return f'background-color: {colors.get(val, "#ffffff")}'
+                
+                st.subheader("🎯 Matching Results")
+                
+                # Get column groups
+                sheet1_cols = [col for col in result.columns if '_Sheet1' in col]
+                sheet2_cols = [col for col in result.columns if '_Sheet2' in col]
+                matched_cols = [rule['col1'] + '_Sheet1' for rule in matching_rules] + \
+                             [rule['col2'] + '_Sheet2' for rule in matching_rules]
+                
+                tab1, tab2 = st.tabs(["Full View", "Comparison View"])
+                
+                with tab1:
+                    st.dataframe(
+                        result.style.applymap(color_status, subset=['Match_Status']),
+                        height=700,
+                        column_config={
+                            "Match_Score": st.column_config.ProgressColumn(
+                                "Confidence",
+                                format="%.0f%%",
+                                min_value=0,
+                                max_value=100,
+                            )
+                        }
+                    )
+                
+                with tab2:
+                    cols = st.columns([2,3,2])
+                    with cols[0]:
+                        st.write("### Sheet1 Data")
+                        st.dataframe(result[[c for c in sheet1_cols if c not in matched_cols]])
+                    with cols[1]:
+                        st.write("### Matched Columns")
+                        st.dataframe(result[matched_cols])
+                    with cols[2]:
+                        st.write("### Sheet2 Data")
+                        st.dataframe(result[[c for c in sheet2_cols if c not in matched_cols]])
+                
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    result.to_excel(writer, index=False)
+                    result.to_excel(writer, index=False, sheet_name="Matches")
+                    df_sheet1.to_excel(writer, index=False, sheet_name=f"{sheet_names[0]}_original")
+                    df_sheet2.to_excel(writer, index=False, sheet_name=f"{sheet_names[1]}_original")
+                
                 st.download_button(
-                    label="📥 Download Matches",
+                    label="📥 Download Full Report",
                     data=output.getvalue(),
-                    file_name="ultra_strict_matches.xlsx",
+                    file_name="smart_matches.xlsx",
                     mime="application/vnd.ms-excel",
                     type="primary"
                 )
                 
-                # --- Summary Stats ---
-                st.subheader("Match Summary")
+                st.subheader("📊 Match Summary")
                 cols = st.columns(4)
-                ultra_strict = len(result[result['Type'] == 'Ultra-Strict Match'])
-                verified = len(result[result['Match_Status'] == 'Verified'])
-                review_needed = len(result[result['Match_Status'] == 'Manual Review Needed'])
-                no_match = len(result[result['Type'] == 'No Match'])
-                
-                cols[0].metric("Ultra-Strict", ultra_strict)
-                cols[1].metric("Verified", verified)
-                cols[2].metric("Needs Review", review_needed)
-                cols[3].metric("No Match", no_match)
-    
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
+                cols[0].metric("🔒 Ultra-Strict", len(result[result['Match_Type'] == 'Ultra-Strict Match']))
+                cols[1].metric("✅ Verified", len(result[result['Match_Status'] == 'Verified']))
+                cols[2].metric("🔄 Needs Review", len(result[result['Match_Status'] == 'Manual Review Needed']))
+                cols[3].metric("❌ No Match", len(result[result['Match_Type'] == 'No Match']))
 
-# --- Sidebar ---
+    except Exception as e:
+        st.error(f"🚨 Error: {str(e)}")
 with st.sidebar:
-    st.markdown("### Matching Rules")
-    st.markdown("""
-    **Ultra-Strict Requirements:**
-    - Minimum **2 matching words**
-    - Each word must have **≥85% similarity**
-    - Words must be in **similar positions**
+    st.markdown("## 🎯 Super Smart Matcher")
     
-    **Verification Tiers:**
-    - ✅ **Verified (90%+)** - Perfect matches
-    - 🟢 **Confirmed (85-89%)** - Strong matches
-    - 🟡 **Review Recommended (60-84%)** - Good matches
-    - 🟠 **Manual Review Needed (<60%)** - Possible matches
-    - ⬜ **No Match** - No similarity found
+    # Fun dropdown explanation
+    with st.expander("🤔 How This Works"):
+        st.markdown("""
+        ### ✨ The Matching Wizardry
+        
+        This cures the irregular name matchup to an extent
+        
+        1. **🕵️‍♂️ Name Detective**  
+           - Breaks names into words  
+           - Hunts for similar words in similar positions  
+           - Requires **2+ words with 50%+ similarity**
+        
+        2. **🔍 Multi-Level Matching**  
+           - Match on multiple columns (add as many as you want!)  
+           - Set different similarity thresholds for each  
+        
+        3. **🎯 Smart Scoring**  
+           - **90%+** = ✅ Verified (Perfect match!)  
+           - **85-89%** = 🟢 Confirmed (Pretty sure!)  
+           - **50-84%** = 🟡 Review Recommended (Looks familiar...)  
+           - **<50%** = 🟠 Manual Review (Hmm, maybe?)  
+           - **0%** = ⬜ No Match (Total strangers!)  
+        
+        4. **📊 Results That Make Sense**  
+           - Side-by-side comparison  
+           - Confidence scores  
+           - Color-coded status  
+        
+        ### 💡 Pro Tip:
+        Start with 50% similarity and adjust up if you get too many matches!
+        """)
+    
+    st.markdown("---")
+    st.markdown("### 🛠️ Matching Rules")
+    st.markdown("""
+    - Minimum **2 matching words**  
+    - Each word must have **≥50% similarity**  
+    - Words in **similar positions** score higher  
+    - **Multiple columns** can be matched  
+    - Each column can have **custom thresholds**  
     """)
 
 # --- Footer ---
 st.markdown("---")
-st.caption("🔒 85%+ similarity matching | 📊 Multi-tier verification | ✅ Professional-grade results")
+st.caption("🔍 50%+ similarity matching | 📊 Multi-tier verification | 🎯 Results that make sense")
