@@ -3,18 +3,23 @@ from difflib import SequenceMatcher
 import streamlit as st
 from io import BytesIO
 
-# Increase pandas styler max elements
-pd.set_option("styler.render.max_elements", 2**31-1)  # Maximum integer value
-
-# Check for openpyxl and install if missing
 try:
     import openpyxl
 except ImportError:
-    st.warning("The 'openpyxl' package is required. Installing it now...")
-    import subprocess
-    import sys
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
-    import openpyxl
+    st.error("""
+        Critical Error: The 'openpyxl' package is required but not installed.
+        
+        For local development, run:
+        `pip install openpyxl`
+        
+        For Streamlit Cloud, add 'openpyxl' to requirements.txt
+        """)
+    st.stop()
+
+# Increase pandas styler max elements
+pd.set_option("styler.render.max_elements", 2**31-1)
+
+
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -208,6 +213,10 @@ def ultra_strict_matching(df1, df2, match_cols):
         ascending=[False, True]
     )
 
+
+
+
+
 # --- UI Components ---
 def matching_level_ui(level_idx, sheet1_cols, sheet2_cols):
     cols = st.columns([3, 3, 2, 1])
@@ -245,8 +254,7 @@ st.markdown("""
 - **2+ words at 50%+ similarity**  
 - **Multi-level matching**  
 - **Upload you data in a file with two sheets** 
-- **NOTE: Éhis akóma douléiá,
-   Download and verify data for duplicates or remove duplicates before matching**  
+- **Download and verify data for duplicates or remove duplicates before matching**  
 """)
 
 uploaded_file = st.file_uploader("Upload Excel file with two sheets:", type=["xlsx", "xls"])
